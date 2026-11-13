@@ -8,8 +8,9 @@ Model (per market, fitted only on the case's own 72h of minute prices):
   q_tau(h) = clamp(x + z_tau * k_tau * sigma * h**0.38, 0, 1), rounded to 6 dp
 where x is the market's last price at the checkpoint and sigma is a robust
 scale of its recent 1-minute price moves: the standard deviation of the
-1-minute changes over the last 12 hours (720 minutes), trimmed 2% on each
-side so a rare huge jump does not blow the scale up. The tails are widened
+1-minute changes, trimmed 2% on each side so a rare huge jump does not blow
+the scale up, blended as 0.7 * (last 12 hours) + 0.3 * (last 2 hours) so the
+band reacts when a market's volatility regime changes. The tails are widened
 (k = 1.6 at 5%/95%, 1.0 at 25%/75%) because the moves are heavy-tailed, and
 the spread grows like h**0.38 rather than sqrt(h) because the moves are
 mean-reverting over hours. The median is the last price: prediction-market
@@ -17,8 +18,8 @@ prices are martingales, and adding a drift made the practice loss worse.
 A floor of 0.0004 keeps a flat market from getting a zero-width band.
 
 Practice score (local, on the six practice cases, scored against Polymarket's
-own history): pinball loss 0.272686, vs the house baseline's 0.363589 and the
-best house entry's 0.313. Median error 0.767503, 90% coverage 0.891276.
+own history): pinball loss 0.266915, vs the house baseline's 0.363589 and the
+best house entry's 0.313. Median error 0.767503, 90% coverage 0.902799.
 
 Deterministic: no randomness, no wall clock, no network. Reads every
 <id>.in in the input directory and writes <id>.out to the output directory.
@@ -44,6 +45,10 @@ Z = [-1.644854 * 1.6, -0.67449, 0.0, 0.67449, 1.644854 * 1.6]
 ALPHA = 0.38
 # Recent window (minutes) for the volatility estimate.
 SIGMA_WINDOW = 720
+# Short window (minutes) blended in so the band reacts when a market's
+# volatility regime changes; weight of the short window in the blend.
+SIGMA_WINDOW_SHORT = 120
+SIGMA_SHORT_WEIGHT = 0.3
 # Trim fraction on each side when estimating the scale (robust to jumps).
 TRIM = 0.02
 # Minimum 1-minute scale, so a flat market still gets a band.
@@ -66,16 +71,26 @@ def robust_sigma(changes):
     return pstdev(core)
 
 
+def sigma_for_window(prices, window):
+    """Trimmed 1-minute scale over the last `window` minutes (floored)."""
+    n = len(prices)
+    w = min(window, n - 1)
+    changes = [prices[i + 1] - prices[i] for i in range(n - w - 1, n - 1)]
+    return max(robust_sigma(changes), SIGMA_FLOOR)
+
+
 def forecast(market, horizon, h_pow):
     """The forecast rows for one market: horizon rows of five quantiles."""
     prices = market["prices"]
     if not prices:
         raise ValueError("market %s has no prices" % market["id"])
     x = prices[-1]
-    n = len(prices)
-    w = min(SIGMA_WINDOW, n - 1)
-    changes = [prices[i + 1] - prices[i] for i in range(n - w - 1, n - 1)]
-    sigma = max(robust_sigma(changes), SIGMA_FLOOR)
+    # Blend a 12-hour scale with a 2-hour one so the band reacts when a
+    # market's volatility regime changes, without chasing every blip.
+    # (Practice loss 0.272686 -> 0.266915; wins on all six practice cases.)
+    sigma = (1.0 - SIGMA_SHORT_WEIGHT) * sigma_for_window(
+        prices, SIGMA_WINDOW
+    ) + SIGMA_SHORT_WEIGHT * sigma_for_window(prices, SIGMA_WINDOW_SHORT)
     rows = []
     for h in range(1, horizon + 1):
         spread = sigma * h_pow[h]
